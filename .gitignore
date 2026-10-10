@@ -211,3 +211,18 @@ wandb/
 runs/
 scratch/
 figures/
+
+# Wireless datasets and generated experiment artifacts (keep these out of Git).
+data/
+checkpoints/
+outputs/
+artifacts/
+*.h5
+*.hdf5
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.npy
+*.npz
+*.jsonl

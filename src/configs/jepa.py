@@ -1,4 +1,5 @@
 import yaml
+from typing import Literal
 
 from pydantic_settings import BaseSettings
 from .components import EncoderConfig, PredictorConfig, WandBConfig, DatasetConfig, MasksConfig, CheckpointConfig
@@ -14,6 +15,8 @@ class OptimizationConfig(BaseSettings):
     ref_weight_decay: float
     final_weight_decay: float
     grad_clip: float | None
+    grad_accumulation_steps: int = 1
+    precision: Literal["32-true", "bf16-mixed"] = "32-true"
 
 
 class Config(BaseSettings):

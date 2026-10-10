@@ -6,23 +6,39 @@ import numpy as np
 import torch.nn.functional as F
 
 from configs import JEPAConfig
-from models import Encoder, Predictor
+from models import Predictor
+from .encoder import build_encoder
 from .utils import apply_masks, repeat_interleave_batch, get_effective_rank, sample_channel_subsets
 from .validation import ValidationModule
 from schedulers import WarmupCosineSchedule, CosineWDSchedule
+
+
+@torch.no_grad()
+def update_target_encoder(context_encoder: nn.Module, target_encoder: nn.Module, momentum: float) -> None:
+    """EMA named state; floating tensors blend and integer buffers copy exactly."""
+    if not 0.0 <= momentum <= 1.0:
+        raise ValueError(f"EMA momentum must be in [0, 1], got {momentum}.")
+    for kind, source, target in (
+        ("parameter", dict(context_encoder.named_parameters()), dict(target_encoder.named_parameters())),
+        ("buffer", dict(context_encoder.named_buffers()), dict(target_encoder.named_buffers())),
+    ):
+        if source.keys() != target.keys():
+            raise RuntimeError(f"Context and target encoder {kind} names differ.")
+        for name, source_tensor in source.items():
+            target_tensor = target[name]
+            if source_tensor.shape != target_tensor.shape or source_tensor.dtype != target_tensor.dtype:
+                raise RuntimeError(f"Context and target {kind} mismatch at {name}.")
+            if target_tensor.is_floating_point() or target_tensor.is_complex():
+                target_tensor.mul_(momentum).add_(source_tensor.detach(), alpha=1.0 - momentum)
+            else:
+                target_tensor.copy_(source_tensor)
 
 
 class JEPA(ValidationModule):
     def __init__(self, config: JEPAConfig, iterations_per_epoch: int, eval_fns: list[callable], metrics: list[str]):
         super().__init__(eval_fns, metrics)
         CONFIG = config
-        self.context_encoder = Encoder(
-            img_size=CONFIG.encoder.img_size,
-            patch_size=CONFIG.encoder.patch_size,
-            embed_dim=CONFIG.encoder.embed_dim,
-            depth=CONFIG.encoder.depth,
-            num_heads=CONFIG.encoder.num_heads,
-        )
+        self.context_encoder = build_encoder(CONFIG.encoder)
         self.target_encoder = copy.deepcopy(self.context_encoder)
         self.predictor = Predictor(
             num_patches=(CONFIG.encoder.img_size[0] // CONFIG.encoder.patch_size) ** 2,
@@ -41,11 +57,31 @@ class JEPA(ValidationModule):
         self.num_patches = (CONFIG.encoder.img_size[0] // CONFIG.encoder.patch_size) ** 2
 
         self._freeze_target_encoder()
+        self._assert_ema_compatible()
+        self.target_encoder.eval()
         self.config = CONFIG
 
     def _freeze_target_encoder(self):
         for param in self.target_encoder.parameters():
             param.requires_grad = False
+
+    def _assert_ema_compatible(self):
+        for name, parameter in self.context_encoder.named_parameters():
+            target = dict(self.target_encoder.named_parameters()).get(name)
+            if target is None or target.shape != parameter.shape:
+                raise RuntimeError(f"Context/target parameter mismatch at {name}.")
+        for name, buffer in self.context_encoder.named_buffers():
+            target = dict(self.target_encoder.named_buffers()).get(name)
+            if target is None or target.shape != buffer.shape:
+                raise RuntimeError(f"Context/target buffer mismatch at {name}.")
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        self.target_encoder.eval()
+        return self
+
+    def update_target(self, momentum: float) -> None:
+        update_target_encoder(self.context_encoder, self.target_encoder, momentum)
 
     def forward(self, x, masks_enc, masks_pred):
         C = x.size(1)
@@ -92,36 +128,54 @@ class JEPA(ValidationModule):
         return total_loss
         
     def training_step_per_patch(self, name, batch):
-        x, masks_enc, masks_pred = batch
-        C_max = x.size(1)
-        if C_max > 1:
-            C_prime = torch.randint(2, C_max + 1, (1,)).item()
-            x = sample_channel_subsets(x, C_prime)
-            self.log(f"num_channels_{name}", C_prime, on_step=True, on_epoch=True, logger=True)
-
-        latent_mask_pred, latent_mask_target, target_out = self(x, masks_enc, masks_pred)
-        
-        loss = self.loss(latent_mask_pred, latent_mask_target)
+        loss, mask_percentage, latent_rep, c_prime = self.compute_loss_per_patch(batch)
         self.log(f'train_loss_{name}', loss, on_step=True, on_epoch=True, logger=True)
-
-        mask_percentage = 1 - len(masks_enc[0][0]) / self.num_patches
-
-        latent_rep = target_out.mean(dim=1).detach()
-        
+        self.log(f"num_channels_{name}", c_prime, on_step=True, on_epoch=True, logger=True)
         return loss, mask_percentage, latent_rep
+
+    def compute_loss_per_patch(self, batch):
+        groups = self.compute_loss_groups(batch)
+        batch_size = batch[0].shape[0]
+        loss = sum(group["loss"] * group["sample_count"] / batch_size for group in groups)
+        mask_percentage = sum(group["mask_percentage"] * group["sample_count"] / batch_size for group in groups)
+        latent_rep = torch.cat([group["latent_rep"] for group in groups], dim=0)
+        mean_channels = sum(group["channels"] * group["sample_count"] for group in groups) / batch_size
+        return loss, mask_percentage, latent_rep, mean_channels
+
+    def compute_loss_groups(self, batch):
+        """Return one graph per sampled channel count so the trainer can backward sequentially."""
+        x, masks_enc, masks_pred = batch
+        batch_size, max_channels = x.shape[:2]
+        channel_counts = torch.randint(1, max_channels + 1, (batch_size,), device=x.device)
+        groups = []
+        for channel_count in torch.unique(channel_counts, sorted=True).tolist():
+            rows = torch.nonzero(channel_counts == channel_count, as_tuple=False).flatten()
+            group_x = x.index_select(0, rows)
+            if channel_count < max_channels:
+                group_x = sample_channel_subsets(group_x, channel_count)
+            group_enc = [mask.index_select(0, rows) for mask in masks_enc]
+            group_pred = [mask.index_select(0, rows) for mask in masks_pred]
+            prediction, target, target_out = self(group_x, group_enc, group_pred)
+
+            num_masks = len(group_pred)
+            group_size = len(rows)
+            per_sample_loss = F.mse_loss(prediction, target, reduction="none")
+            per_sample_loss = per_sample_loss.reshape(num_masks, group_size, -1, per_sample_loss.shape[-1])
+            per_sample_loss = per_sample_loss.mean(dim=(0, 2, 3))
+            mask_percentage = 1 - len(group_enc[0][0]) / self.num_patches
+            groups.append({
+                "loss": per_sample_loss.mean(),
+                "sample_count": group_size,
+                "channels": channel_count,
+                "mask_percentage": mask_percentage,
+                "latent_rep": target_out.mean(dim=1).detach(),
+            })
+        return groups
     
     def on_train_batch_start(self, batch, batch_idx):
         wd = self.optimizers().param_groups[0]['weight_decay']
         self.log('weight_decay', wd, on_step=True, on_epoch=False, logger=True) 
     
-    def on_train_batch_end(self, outputs, batch, batch_idx):
-        with torch.no_grad():
-            m = self.ema_start + (self.global_step - 1) * (self.ema_end - self.ema_start) / self.total_steps
-            for param_q, param_k in zip(self.context_encoder.parameters(), self.target_encoder.parameters()):
-                param_k.data.mul_(m).add_((1.-m) * param_q.detach().data) 
-            
-        self.log("ema_momentum", m, on_step=True, on_epoch=False, logger=True)
-
     def _get_validation_tokens_reps(self, x):
         return self.target_encoder(x)
 

@@ -5,12 +5,24 @@ from pydantic import Field
 from typing import Literal
 
 
+class Mamba2Config(BaseSettings):
+    d_state: int = 64
+    d_conv: int = 4
+    expand: int = 1
+    headdim: int = 64
+    directionality: Literal["bidirectional", "forward"] = "bidirectional"
+
+
 class EncoderConfig(BaseSettings):
     img_size: tuple[int, int]
     patch_size: int
     embed_dim: int
     depth: int
     num_heads: int
+    architecture: Literal["vit", "mamba2"] = "vit"
+    mlp_ratio: float = 4.0
+    drop_path_rate: float = 0.0
+    mamba2: Mamba2Config = Field(default_factory=Mamba2Config)
 
 
 class PredictorConfig(BaseSettings):
@@ -26,7 +38,7 @@ class ProjectorConfig(BaseSettings):
 
 class WandBConfig(BaseSettings):
     project_name: str
-    key: str = Field(validation_alias="WANDB_KEY")
+    key: str | None = Field(default=None, validation_alias="WANDB_KEY")
 
 
 class PrettrainDatasetConfig(BaseSettings):
@@ -37,12 +49,13 @@ class PrettrainDatasetConfig(BaseSettings):
 
 class DatasetConfig(BaseSettings):
     pretrain_datasets: list[PrettrainDatasetConfig]
-    rfs_path: str
-    pos_path: str
-    beam_path: str
+    rfs_path: str | None = None
+    pos_path: str | None = None
+    beam_path: str | None = None
     batch_size: int
     num_workers: int
     pin_mem: bool
+    validation_fraction: float = 0.05
 
 
 class MultiBlockMaskConfig(BaseSettings):

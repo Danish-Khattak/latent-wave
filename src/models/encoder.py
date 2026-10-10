@@ -9,6 +9,33 @@ from .utils import get_2d_sincos_pos_embed, apply_masks
 from .components import Block, PatchEmbed
 
 
+def build_encoder(config):
+    """Build the configured sequence mixer while preserving the patch/token contract."""
+    common = {
+        "img_size": config.img_size,
+        "patch_size": config.patch_size,
+        "embed_dim": config.embed_dim,
+        "depth": config.depth,
+        "num_heads": config.num_heads,
+        "mlp_ratio": getattr(config, "mlp_ratio", 4.0),
+        "drop_path_rate": getattr(config, "drop_path_rate", 0.0),
+    }
+    architecture = getattr(config, "architecture", "vit")
+    if architecture == "vit":
+        return Encoder(**common)
+    if architecture == "mamba2":
+        from .mamba2_encoder import Mamba2Encoder
+
+        if hasattr(config.mamba2, "model_dump"):
+            mamba_config = config.mamba2.model_dump()
+        elif isinstance(config.mamba2, dict):
+            mamba_config = config.mamba2
+        else:
+            mamba_config = vars(config.mamba2)
+        return Mamba2Encoder(**common, **mamba_config)
+    raise ValueError(f"Unknown encoder architecture: {architecture!r}")
+
+
 class Encoder(nn.Module):
     """ Vision Transformer """
     def __init__(

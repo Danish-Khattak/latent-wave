@@ -110,7 +110,8 @@ def sample_channel_subsets(x, C_prime):
     
     noise = torch.rand(B, C_max, device=x.device)
     perms = noise.argsort(dim=1)
-    selected = perms[:, :C_prime]
+    # Retain the original antenna order so state-space sequence order is stable.
+    selected = perms[:, :C_prime].sort(dim=1).values
     
     batch_idx = torch.arange(B, device=x.device)[:, None]
     x_sub = x[batch_idx, selected]

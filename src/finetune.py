@@ -10,7 +10,7 @@ import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 from torch.nn.init import trunc_normal_
 
-from models import get_latent_wfm, LatentWFM, WavesFM, get_wavesfm
+from models import get_latent_wfm, LatentWFM
 from data import SUPPORTED_TASKS, build_datasets
 from lora import create_lora_model
 from engine import evaluate, train_one_epoch
@@ -88,7 +88,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def build_model(args: argparse.Namespace, task_info) -> LatentWFM | WavesFM:
+def build_model(args: argparse.Namespace, task_info) -> torch.nn.Module:
     if args.model_type == "latentwfm":
         model = get_latent_wfm(
             num_outputs=task_info.num_outputs,
@@ -96,11 +96,7 @@ def build_model(args: argparse.Namespace, task_info) -> LatentWFM | WavesFM:
             patch_size=args.vis_patch,
         )
     elif args.model_type == "wavesfm":
-        model = get_wavesfm(
-            num_outputs=task_info.num_outputs,
-            img_size=(args.vis_img_size, args.vis_img_size),
-            patch_size=args.vis_patch,
-        )
+        raise RuntimeError("The WavesFM model module is not present in this checkout.")
     else:
         raise ValueError(f"Unknown model type: {args.model_type}")
 

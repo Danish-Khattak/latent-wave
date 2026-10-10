@@ -9,8 +9,11 @@ dependencies = [
     "lightning>=2.6.1",
     "pydantic-settings>=2.13.0",
     "timm>=1.0.24",
-    "torch>=2.10.0",
+    "torch==2.10.0",
     "torchaudio==2.10.0",
+    "mamba-ssm @ git+https://github.com/state-spaces/mamba.git@e9594ce1c732d97440f0332fdc43170a2294dbfa",
+    "causal-conv1d @ https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0%2Bcu13torch2.10cxx11abiTRUE-cp313-cp313-linux_x86_64.whl",
+    "wheel>=0.45.1",
     "typer>=0.24.0",
     "wandb>=0.25.0",
 ]
@@ -21,7 +24,7 @@ torchaudio = { index = "pytorch" }
 
 [[tool.uv.index]]
 name = "pytorch"
-url = "https://download.pytorch.org/whl/cu126"
+url = "https://download.pytorch.org/whl/cu130"
 
 [dependency-groups]
 dev = [
@@ -34,4 +37,12 @@ dev = [
     "seaborn>=0.13.2",
     "tabulate>=0.10.0",
     "umap-learn>=0.5.11",
+    "pytest>=8.4.2",
 ]
+
+[tool.uv]
+no-build-isolation-package = ["mamba-ssm"]
+
+[tool.pytest.ini_options]
+markers = ["cuda_mamba2: exercises the official Mamba-2 kernels on CUDA"]
+pythonpath = ["src"]
